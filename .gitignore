@@ -18,3 +18,7 @@ captures/
 .AppleDouble
 .LSOverride
 Thumbs.db
+
+# Historical local Sprint backups — Git history replaces these
+*.backup_sprint*
+*.backup_*

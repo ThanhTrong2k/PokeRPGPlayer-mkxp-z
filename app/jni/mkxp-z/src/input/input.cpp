@@ -26,6 +26,7 @@
 #include "input/keybindings.h"
 #include "util/exception.h"
 #include "util/util.h"
+#include "debugwriter.h"
 
 #include <SDL_scancode.h>
 #include <SDL_keyboard.h>
@@ -1012,8 +1013,23 @@ struct InputPrivate
     void pollBindingPriv(const Binding &b,
                          Input::ButtonCode &repeatCand)
     {
-        if (!b.sourceActive())
-            return;
+        static int sprint40PollCounter = 0;
+        bool sprint40IsDirectionalTarget =
+            (b.target == Input::Up || b.target == Input::Down ||
+             b.target == Input::Left || b.target == Input::Right);
+
+        if (sprint40IsDirectionalTarget) {
+            bool sprint40SourceActive = b.sourceActive();
+            if ((++sprint40PollCounter % 30) == 0) {
+                Debug() << "SPRINT40_DIAG: pollBindingPriv() target=" << b.target
+                        << " sourceActive()=" << sprint40SourceActive;
+            }
+            if (!sprint40SourceActive)
+                return;
+        } else {
+            if (!b.sourceActive())
+                return;
+        }
         
         if (b.target == Input::None)
             return;
@@ -1098,6 +1114,29 @@ struct InputPrivate
     }
     
     void updateDir4()
+    {
+        static int sprint40UpdateDir4Counter = 0;
+        bool sprint40LogThisCall = ((++sprint40UpdateDir4Counter % 30) == 0);
+
+        if (sprint40LogThisCall) {
+            Debug() << "SPRINT40_DIAG: updateDir4() pre-state"
+                    << " Up.pressed=" << getState(Input::Up).pressed
+                    << " Down.pressed=" << getState(Input::Down).pressed
+                    << " Left.pressed=" << getState(Input::Left).pressed
+                    << " Right.pressed=" << getState(Input::Right).pressed
+                    << " dir4Data.active(before)=" << dir4Data.active;
+        }
+
+        updateDir4Impl();
+
+        if (sprint40LogThisCall) {
+            Debug() << "SPRINT40_DIAG: updateDir4() post-state"
+                    << " dir4Data.active(after)=" << dir4Data.active
+                    << " dir4Data.previous=" << dir4Data.previous;
+        }
+    }
+
+    void updateDir4Impl()
     {
         int dirFlag = 0;
         
@@ -1424,6 +1463,9 @@ bool Input::mouseInWindow() {
 
 int Input::dir4Value()
 {
+    static int sprint40DirValueCounter = 0;
+    Debug() << "SPRINT40_DIAG: Input::dir4Value() call #" << (++sprint40DirValueCounter)
+            << " returning active=" << p->dir4Data.active;
     return p->dir4Data.active;
 }
 

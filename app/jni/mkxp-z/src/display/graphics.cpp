@@ -847,6 +847,12 @@ struct GraphicsPrivate {
         
         recalculateScreenSize(rtData);
         updateScreenResoRatio(rtData);
+
+        Debug() << "SPRINT32_DIAG: GraphicsPrivate constructor — initial winSize="
+                << winSize.x << "x" << winSize.y
+                << "scRes=" << scRes.x << "x" << scRes.y
+                << "scSize=" << scSize.x << "x" << scSize.y
+                << "scOffset=" << scOffset.x << "," << scOffset.y;
         
         TEXFBO::init(frozenScene);
         TEXFBO::allocEmpty(frozenScene, scRes.x, scRes.y);
@@ -951,24 +957,61 @@ struct GraphicsPrivate {
     }
     
     void checkResize(bool skipIntScaleBuffer = false) {
-        if (threadData->windowSizeMsg.poll(winSize)) {
-            /* Query the actual size in pixels, not units */
-            Vec2i drawableSize(winSize);
-            threadData->drawableSizeMsg.poll(drawableSize);
-            
-            backingScaleFactor = drawableSize.x / winSize.x;
-            winSize = drawableSize;
-            
+        int realWinW = 0, realWinH = 0, realDrwW = 0, realDrwH = 0;
+        SDL_GetWindowSize(threadData->window, &realWinW, &realWinH);
+        SDL_GL_GetDrawableSize(threadData->window, &realDrwW, &realDrwH);
+
+        bool realSizeQueryValid = (realWinW > 0 && realWinH > 0 && realDrwW > 0 && realDrwH > 0);
+        bool drawableMismatchDetected = realSizeQueryValid &&
+            (realDrwW != winSize.x || realDrwH != winSize.y);
+
+        static int sprint32CheckResizeCounter = 0;
+        if (++sprint32CheckResizeCounter % 60 == 0) {
+            Debug() << "SPRINT32_DIAG: checkResize() called — cached winSize="
+                    << winSize.x << "x" << winSize.y
+                    << "real SDL_GetWindowSize=" << realWinW << "x" << realWinH
+                    << "real SDL_GL_GetDrawableSize=" << realDrwW << "x" << realDrwH
+                    << "realSizeQueryValid=" << realSizeQueryValid
+                    << "drawableMismatchDetected=" << drawableMismatchDetected;
+        }
+
+        if (drawableMismatchDetected) {
+            Debug() << "SPRINT31_DIAG: checkResize() drawable-size mismatch — cached winSize="
+                    << winSize.x << "x" << winSize.y
+                    << "real SDL_GetWindowSize=" << realWinW << "x" << realWinH
+                    << "real SDL_GL_GetDrawableSize=" << realDrwW << "x" << realDrwH
+                    << "— forcing recalculation with the real, current drawable size.";
+        }
+
+        if (threadData->windowSizeMsg.poll(winSize) || drawableMismatchDetected) {
+            if (drawableMismatchDetected) {
+                winSize = Vec2i(realDrwW, realDrwH);
+                backingScaleFactor = (float)realDrwW / (float)realWinW;
+            } else {
+                /* Query the actual size in pixels, not units */
+                Vec2i drawableSize(winSize);
+                threadData->drawableSizeMsg.poll(drawableSize);
+
+                backingScaleFactor = (float)drawableSize.x / (float)winSize.x;
+                winSize = drawableSize;
+            }
+
             /* Make sure integer buffers are rebuilt before screen offsets are
              * calculated so we have the final allocated buffer size ready */
             if (integerScaleActive && findHighestIntegerScale() && !skipIntScaleBuffer)
                 rebuildIntegerScaleBuffer();
-            
+
             /* some GL drivers change the viewport on window resize */
             glState.viewport.refresh();
             recalculateScreenSize(threadData);
             updateScreenResoRatio(threadData);
-            
+
+            Debug() << "SPRINT31_DIAG: after recalculateScreenSize() — logicalW,H="
+                    << scRes.x << "," << scRes.y
+                    << "drawableW,H=" << winSize.x << "," << winSize.y
+                    << "scale-derived viewportW,H=" << scSize.x << "," << scSize.y
+                    << "viewportX,Y=" << scOffset.x << "," << scOffset.y;
+
             SDL_Rect screen = {scOffset.x, scOffset.y, scSize.x, scSize.y};
             threadData->ethread->notifyGameScreenChange(screen);
         }
@@ -991,7 +1034,38 @@ struct GraphicsPrivate {
         SDL_GL_SwapWindow(threadData->window);
         
         ++frameCount;
-        
+
+        // Sprint 46 diagnostic: measures the REAL elapsed wall-clock
+        // time (SDL's own high-resolution performance counter, the
+        // same source FPSLimiter itself already trusts) between
+        // throttled log intervals, and computes the loop's own true,
+        // measured FPS — directly comparable against p->frameRate's
+        // own assumed value (confirmed, per this sprint's own
+        // constructor-level trace, to potentially remain at 40 even
+        // when fixedFramerate=60 is correctly configured). If the
+        // measured real FPS is wildly different from p->frameRate,
+        // any Ruby-side "elapsed seconds = frame_count / frame_rate"
+        // computation would be proportionally wrong by exactly that
+        // ratio — directly relevant to the extreme playtime jumps
+        // Ti observed.
+        static uint64_t sprint46LastLogTick = SDL_GetPerformanceCounter();
+        static unsigned long long sprint46LastLogFrameCount = frameCount;
+        static const uint64_t sprint46PerfFreq = SDL_GetPerformanceFrequency();
+        if (frameCount % 120 == 0) {
+            uint64_t nowTick = SDL_GetPerformanceCounter();
+            double realSecondsElapsed = (double)(nowTick - sprint46LastLogTick) / (double)sprint46PerfFreq;
+            unsigned long long framesElapsed = frameCount - sprint46LastLogFrameCount;
+            double measuredFps = realSecondsElapsed > 0 ? (double)framesElapsed / realSecondsElapsed : -1.0;
+            Debug() << "SPRINT46_DIAG: swapGLBuffer() frameCount=" << frameCount
+                    << "framesElapsed=" << framesElapsed
+                    << "realSecondsElapsed=" << realSecondsElapsed
+                    << "measuredFps=" << measuredFps
+                    << "p->frameRate (assumed by Ruby-side timing math)=" << frameRate
+                    << "(a large mismatch between measuredFps and frameRate directly explains a proportional playtime-computation error)";
+            sprint46LastLogTick = nowTick;
+            sprint46LastLogFrameCount = frameCount;
+        }
+
         threadData->ethread->notifyFrame();
     }
     
@@ -1016,6 +1090,21 @@ struct GraphicsPrivate {
     }
     
     void metaBlitBufferFlippedScaled(const Vec2i &sourceSize, bool forceNearestNeighbor=false) {
+        static int sprint32FrameCounter = 0;
+        if (++sprint32FrameCounter % 60 == 0) {
+            int dstX = scOffset.x;
+            int dstY = scSize.y + scOffset.y;
+            int dstW = scSize.x;
+            int dstH = -scSize.y;
+            Debug() << "SPRINT32_DIAG: metaBlitBufferFlippedScaled() — logicalSourceSize="
+                    << sourceSize.x << "x" << sourceSize.y
+                    << "cached winSize=" << winSize.x << "x" << winSize.y
+                    << "scRes=" << scRes.x << "x" << scRes.y
+                    << "scSize=" << scSize.x << "x" << scSize.y
+                    << "scOffset=" << scOffset.x << "," << scOffset.y
+                    << "final blitRectangle dst(x,y,w,h)=" << dstX << "," << dstY << "," << dstW << "," << dstH;
+        }
+
         GLMeta::blitRectangle(IntRect(0, 0, sourceSize.x, sourceSize.y),
                               IntRect(scOffset.x, scSize.y+scOffset.y, scSize.x, -scSize.y),
                               !forceNearestNeighbor && threadData->config.smoothScaling);
@@ -1125,14 +1214,42 @@ struct GraphicsPrivate {
 
 Graphics::Graphics(RGSSThreadData *data) {
     p = new GraphicsPrivate(data);
+
+    // Sprint 46 diagnostic: this constructor is the exact, confirmed
+    // location of why Graphics.frame_rate can remain at its own
+    // DEF_FRAMERATE default (40 for RGSS1, 60 otherwise) even when
+    // fixedFramerate is correctly set to 60 in config. Traced directly:
+    // the `else if (fixedFramerate > 0)` branch below only configures
+    // fpsLimiter's own internal throttle target — it never assigns
+    // p->frameRate, which is the exact field Graphics.frame_rate (the
+    // Ruby-exposed getter, DEF_ATTR_RD_SIMPLE) reads from. Only the
+    // syncToRefreshrate branch (the first one) ever updates
+    // p->frameRate at construction time. Logged unconditionally, once
+    // per Graphics construction (this runs once per session, not
+    // per-frame, so no throttling is needed).
+    Debug() << "SPRINT46_DIAG: Graphics::Graphics() constructor — "
+            << "data->config.syncToRefreshrate=" << data->config.syncToRefreshrate
+            << "data->config.fixedFramerate=" << data->config.fixedFramerate
+            << "data->refreshRate=" << data->refreshRate
+            << "p->frameRate (post-GraphicsPrivate-construction, before branch)=" << p->frameRate;
+
     if (data->config.syncToRefreshrate) {
         p->frameRate = data->refreshRate;
         p->fpsLimiter.disabled = true;
+        Debug() << "SPRINT46_DIAG: took syncToRefreshrate branch — p->frameRate set to data->refreshRate=" << data->refreshRate;
     } else if (data->config.fixedFramerate > 0) {
         p->fpsLimiter.setDesiredFPS(data->config.fixedFramerate);
+        Debug() << "SPRINT46_DIAG: took fixedFramerate>0 branch — fpsLimiter target set to " << data->config.fixedFramerate
+                << " but p->frameRate (Graphics.frame_rate's own source) is NOT updated by this branch — it remains at its own DEF_FRAMERATE default.";
     } else if (data->config.fixedFramerate < 0) {
         p->fpsLimiter.disabled = true;
+        Debug() << "SPRINT46_DIAG: took fixedFramerate<0 branch — fpsLimiter disabled.";
+    } else {
+        Debug() << "SPRINT46_DIAG: took NO branch (syncToRefreshrate=false, fixedFramerate=0) — fpsLimiter runs at its own constructor-time default, p->frameRate unchanged from DEF_FRAMERATE.";
     }
+
+    Debug() << "SPRINT46_DIAG: Graphics::Graphics() constructor complete — final p->frameRate=" << p->frameRate
+            << "(this is exactly what Graphics.frame_rate will report to Ruby from this point until anything explicitly calls the Graphics.frame_rate= setter)";
 }
 
 Graphics::~Graphics() { delete p; }
@@ -1393,26 +1510,49 @@ int Graphics::height() const { return p->scRes.y; }
 void Graphics::resizeScreen(int width, int height) {
     p->threadData->rqWindowAdjust.wait();
     p->checkResize(true);
-    
+
     Vec2i size(width, height);
-    
+
+    Debug() << "SPRINT34_DIAG: [t=" << SDL_GetTicks() << "] Graphics::resizeScreen(" << width << "," << height
+            << ") called — current scRes=" << p->scRes.x << "x" << p->scRes.y
+            << "current physical winSize=" << p->winSize.x << "x" << p->winSize.y;
+
     if (p->scRes == size)
         return;
-    
+
     p->scRes = size;
-    
+
     p->screen.setResolution(width, height);
-    
+
     if (p->integerScaleActive)
         p->rebuildIntegerScaleBuffer();
-    
+
     TEXFBO::allocEmpty(p->frozenScene, width, height);
-    
+
     FloatRect screenRect(0, 0, width, height);
     p->screenQuad.setTexPosRect(screenRect, screenRect);
-    
+
     glState.scissorBox.set(IntRect(0, 0, p->scRes.x, p->scRes.y));
-    
+
+    // Sprint 34 fix: recalculate the aspect-fit viewport immediately,
+    // using the CURRENT physical winSize (unchanged by this call on
+    // Android — see the Sprint 34 fix in eventthread.cpp's own
+    // REQUEST_WINRESIZE handler, which skips the real SDL_SetWindowSize
+    // side effect there) against the just-updated logical scRes.
+    // Without this, scSize/scOffset would only update on some future
+    // frame's own checkResize() call, and only then if a drawable-size
+    // mismatch happened to be detected — neither guaranteed to happen
+    // promptly. Uses the correct threadData->config.fixedAspectRatio
+    // value (not the Sprint 30-identified pointer-to-bool pattern).
+    p->recalculateScreenSize(p->threadData->config.fixedAspectRatio);
+    p->updateScreenResoRatio(p->threadData);
+
+    Debug() << "SPRINT34_DIAG: [t=" << SDL_GetTicks() << "] Graphics::resizeScreen() — after immediate recalculation: logicalW,H="
+            << p->scRes.x << "," << p->scRes.y
+            << "physical winSize=" << p->winSize.x << "," << p->winSize.y
+            << "scale-derived scSize=" << p->scSize.x << "," << p->scSize.y
+            << "scOffset=" << p->scOffset.x << "," << p->scOffset.y;
+
     shState->eThread().requestWindowResize(width, height);
 }
 

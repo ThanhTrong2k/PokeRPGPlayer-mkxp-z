@@ -374,6 +374,16 @@ void EventThread::process(RGSSThreadData &rtData)
 
 				keyStates[event.key.keysym.scancode] = true;
 
+#ifdef __ANDROID__
+				if (event.key.keysym.scancode == SDL_SCANCODE_UP ||
+				    event.key.keysym.scancode == SDL_SCANCODE_DOWN ||
+				    event.key.keysym.scancode == SDL_SCANCODE_LEFT ||
+				    event.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
+					Debug() << "SPRINT40_DIAG: SDL_KEYDOWN scancode=" << event.key.keysym.scancode
+					        << " keyStates[scancode] now=true";
+				}
+#endif
+
 				break;
 
 			case SDL_KEYUP:
@@ -388,6 +398,16 @@ void EventThread::process(RGSSThreadData &rtData)
 				}
 
 				keyStates[event.key.keysym.scancode] = false;
+
+#ifdef __ANDROID__
+				if (event.key.keysym.scancode == SDL_SCANCODE_UP ||
+				    event.key.keysym.scancode == SDL_SCANCODE_DOWN ||
+				    event.key.keysym.scancode == SDL_SCANCODE_LEFT ||
+				    event.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
+					Debug() << "SPRINT40_DIAG: SDL_KEYUP scancode=" << event.key.keysym.scancode
+					        << " keyStates[scancode] now=false";
+				}
+#endif
 
 				break;
 
@@ -457,10 +477,44 @@ void EventThread::process(RGSSThreadData &rtData)
 						setFullscreen(win, static_cast<bool>(event.user.code));
 						break;
 
-					case REQUEST_WINRESIZE:
+					case REQUEST_WINRESIZE: {
+						Debug() << "SPRINT34_DIAG: [t=" << SDL_GetTicks() << "] REQUEST_WINRESIZE handler — requested size="
+						        << event.window.data1 << "x" << event.window.data2;
+
+#ifdef __ANDROID__
+						// Sprint 34 fix: on Android, there is no real
+						// desktop-style "resize the window" operation —
+						// the Android surface is always fullscreen and
+						// cannot be legitimately shrunk this way.
+						// Sprint 33's own exhaustive trace confirmed
+						// this was the ONE call site in the entire
+						// codebase capable of the observed regression:
+						// calling SDL_SetWindowSize() here with the
+						// game's own small logical resolution (e.g.
+						// 512x384, from Graphics.resize_screen)
+						// corrupted SDL's own subsequent
+						// SDL_GetWindowSize()/SDL_GL_GetDrawableSize()
+						// reporting, permanently anchoring the render
+						// viewport to that small size. Skipped entirely
+						// on Android — Graphics.resize_screen's own
+						// update to the LOGICAL resolution (scRes)
+						// still happens normally in graphics.cpp
+						// (unaffected by this change); only this one,
+						// specific OS-level side effect is neutralized.
+						int currentRealWinW = 0, currentRealWinH = 0, currentRealDrwW = 0, currentRealDrwH = 0;
+						SDL_GetWindowSize(win, &currentRealWinW, &currentRealWinH);
+						SDL_GL_GetDrawableSize(win, &currentRealDrwW, &currentRealDrwH);
+						Debug() << "SPRINT34_DIAG: [t=" << SDL_GetTicks() << "] Android — skipping real SDL_SetWindowSize("
+						        << event.window.data1 << "," << event.window.data2
+						        << "); physical window/drawable unchanged: SDL_GetWindowSize="
+						        << currentRealWinW << "x" << currentRealWinH
+						        << "SDL_GL_GetDrawableSize=" << currentRealDrwW << "x" << currentRealDrwH;
+#else
 						SDL_SetWindowSize(win, event.window.data1, event.window.data2);
+#endif
 						rtData.rqWindowAdjust.clear();
 						break;
+					}
 
 					case REQUEST_WINREPOSITION:
 						SDL_SetWindowPosition(win, event.window.data1, event.window.data2);
